@@ -1,0 +1,36 @@
+[transport]
+type = "tun"
+heartbeat_interval = 10
+heartbeat_timeout = 25
+
+[tun]
+encapsulation = "ipx"
+name = "backhaul"
+local_addr = "10.10.10.2/24"
+remote_addr = "10.10.10.1/24"
+health_port = 1234
+mtu = 1320
+
+[ipx]
+mode = "client"
+profile = "bip"
+listen_ip = "0.0.0.0"
+dst_ip = "185.142.158.220"
+interface = "wlp62s0"
+
+[security]
+enable_encryption = true
+algorithm = "aes-256-gcm"
+psk = "pN9m6m0tH3nE3V8xKZ6Lq5yYcW2K1S7QG9u4cF0A8M4="
+kdf_iterations = 100000
+
+[tuning]
+auto_tuning = true
+tuning_profile = "balanced"
+workers = 0
+channel_size = 10_000
+so_sndbuf = 0
+batch_size = 2048
+
+[logging]
+log_level = "info"

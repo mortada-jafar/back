@@ -1,0 +1,49 @@
+[listener]
+bind_addr = ":8443"
+
+[transport]
+type = "tcpmux"
+nodelay = true
+keepalive_period = 40
+accept_udp = true
+proxy_protocol = false
+heartbeat_interval = 10
+heartbeat_timeout = 25
+
+[mux]
+mux_version = 2
+mux_framesize = 32768
+mux_recievebuffer = 4194304
+mux_streambuffer = 2097152
+mux_concurrency = 8
+
+[security]
+token = "my_secret_token_here"
+
+[tuning]
+auto_tuning = true
+tuning_profile = "balanced"
+workers = 0
+channel_size = 4096
+tcp_mss = 0
+so_rcvbuf = 0
+so_sndbuf = 0
+buffer_profile = "balanced"
+read_timeout = 120
+
+[accept_udp]
+ring_size = 64
+frame_size = 2048
+peer_idle_timeout_s = 120
+write_timeout_ms = 3
+
+[logging]
+log_level = "info"
+
+[ports]
+mapping = [
+    "443",
+    "8080=80",
+    "3000-3010",
+    "5000-5010:6000",
+]

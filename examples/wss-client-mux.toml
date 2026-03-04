@@ -1,0 +1,40 @@
+[dialer]
+remote_addr = "server.example.com:443"
+edge_ip = "cdn-edge.example.com:443"
+dial_timeout = 10
+retry_interval = 3
+
+[transport]
+type = "wssmux"
+nodelay = true
+keepalive_period = 40
+connection_pool = 8
+heartbeat_interval = 10
+heartbeat_timeout = 25
+
+[mux]
+mux_version = 2
+mux_framesize = 32768
+mux_recievebuffer = 4194304
+mux_streambuffer = 2097152
+mux_concurrency = 8
+
+[security]
+token = "my_secret_token_here"
+
+[tls]
+sni = "www.digikala.com"
+
+[tuning]
+auto_tuning = true
+tuning_profile = "fast"
+workers = 0
+channel_size = 4096
+tcp_mss = 0
+so_rcvbuf = 0
+so_sndbuf = 0
+buffer_profile = "balanced"
+read_timeout = 120
+
+[logging]
+log_level = "info"

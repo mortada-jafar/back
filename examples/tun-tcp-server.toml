@@ -1,0 +1,39 @@
+[listener]
+bind_addr = ":8443"
+
+[transport]
+type = "tun"
+nodelay = true
+keepalive_period = 40
+heartbeat_interval = 10
+heartbeat_timeout = 25
+
+[tun]
+encapsulation = "tcp"
+name = "backhaul"
+local_addr = "10.10.10.1/24"
+remote_addr = "10.10.10.2/24"
+health_port = 1234
+mtu = 1500
+
+[security]
+token = "my_secret_token_here"
+
+[tuning]
+auto_tuning = true
+tuning_profile = "balanced"
+workers = 0
+channel_size = 10_000
+tcp_mss = 0
+so_rcvbuf = 0
+so_sndbuf = 0
+
+[logging]
+log_level = "info"
+
+[ports]
+forwarder = "backhaul"
+mapping = [
+    "443",
+    "8080=80",
+]
