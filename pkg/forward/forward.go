@@ -20,10 +20,11 @@ type PortMapping struct {
 }
 
 // ParseMappings parses all mapping formats from the script:
-//   "443"           -> listen 443, forward 443
-//   "443=5000"      -> listen 443, forward 5000
-//   "443-600"       -> listen range 443-600, forward same
-//   "443-600:5201"  -> listen range 443-600, forward starting at 5201
+//
+//	"443"           -> listen 443, forward 443
+//	"443=5000"      -> listen 443, forward 5000
+//	"443-600"       -> listen range 443-600, forward same
+//	"443-600:5201"  -> listen range 443-600, forward starting at 5201
 func ParseMappings(entries []string) ([]PortMapping, error) {
 	var mappings []PortMapping
 	for _, entry := range entries {
@@ -140,25 +141,52 @@ func IPTablesForwarder(listenPort int, remoteIP string, forwardPort int) error {
 	if err := iptablesRule("udp", listenPort, remoteIP, forwardPort); err != nil {
 		return err
 	}
+
+	// MASQUERADE so that reply packets from the TUN remote are properly
+	// returned to the local process (required for the OUTPUT-chain DNAT path).
+	_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+		"-d", remoteIP, "-j", "MASQUERADE",
+	).Run()
+
 	log.Infof("iptables DNAT: :%d -> %s:%d (TCP+UDP)", listenPort, remoteIP, forwardPort)
 	return nil
 }
 
 func iptablesRule(proto string, listenPort int, remoteIP string, fwdPort int) error {
-	args := []string{
-		"-t", "nat", "-A", "PREROUTING",
-		"-p", proto, "--dport", strconv.Itoa(listenPort),
-		"-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", remoteIP, fwdPort),
+	dest := fmt.Sprintf("%s:%d", remoteIP, fwdPort)
+	dport := strconv.Itoa(listenPort)
+
+	// PREROUTING: redirect external traffic arriving on this host
+	if err := exec.Command("iptables", "-t", "nat", "-A", "PREROUTING",
+		"-p", proto, "--dport", dport,
+		"-j", "DNAT", "--to-destination", dest,
+	).Run(); err != nil {
+		return err
 	}
-	return exec.Command("iptables", args...).Run()
+
+	// OUTPUT: redirect locally-originated traffic (e.g. ssh 127.0.0.1 -p <port>)
+	if err := exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+		"-p", proto, "--dport", dport,
+		"-j", "DNAT", "--to-destination", dest,
+	).Run(); err != nil {
+		return err
+	}
+
+	return nil
 }
 
 // CleanupIPTables removes DNAT rules (best-effort on shutdown).
 func CleanupIPTables(listenPort int, remoteIP string, fwdPort int) {
+	dest := fmt.Sprintf("%s:%d", remoteIP, fwdPort)
+	dport := strconv.Itoa(listenPort)
 	for _, proto := range []string{"tcp", "udp"} {
 		exec.Command("iptables", "-t", "nat", "-D", "PREROUTING",
-			"-p", proto, "--dport", strconv.Itoa(listenPort),
-			"-j", "DNAT", "--to-destination", fmt.Sprintf("%s:%d", remoteIP, fwdPort),
+			"-p", proto, "--dport", dport,
+			"-j", "DNAT", "--to-destination", dest,
+		).Run()
+		exec.Command("iptables", "-t", "nat", "-D", "OUTPUT",
+			"-p", proto, "--dport", dport,
+			"-j", "DNAT", "--to-destination", dest,
 		).Run()
 	}
 }
