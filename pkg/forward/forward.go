@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -133,6 +134,10 @@ func handleForward(src net.Conn, target string) {
 
 // IPTablesForwarder sets up iptables DNAT rules for TCP+UDP forwarding.
 func IPTablesForwarder(listenPort int, remoteIP string, forwardPort int) error {
+	// Required for OUTPUT-chain DNAT: allows loopback-sourced packets (127.0.0.1)
+	// to be routed out through real interfaces (e.g. the TUN device).
+	enableRouteLocalnet()
+
 	// DNAT rule for TCP
 	if err := iptablesRule("tcp", listenPort, remoteIP, forwardPort); err != nil {
 		return err
@@ -144,12 +149,46 @@ func IPTablesForwarder(listenPort int, remoteIP string, forwardPort int) error {
 
 	// MASQUERADE so that reply packets from the TUN remote are properly
 	// returned to the local process (required for the OUTPUT-chain DNAT path).
-	_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
-		"-d", remoteIP, "-j", "MASQUERADE",
-	).Run()
+	// Use -C to avoid duplicating the rule on restart.
+	checkMasq := exec.Command("iptables", "-t", "nat", "-C", "POSTROUTING",
+		"-d", remoteIP, "-j", "MASQUERADE").Run()
+	if checkMasq != nil {
+		_ = exec.Command("iptables", "-t", "nat", "-A", "POSTROUTING",
+			"-d", remoteIP, "-j", "MASQUERADE",
+		).Run()
+	}
 
 	log.Infof("iptables DNAT: :%d -> %s:%d (TCP+UDP)", listenPort, remoteIP, forwardPort)
 	return nil
+}
+
+// enableRouteLocalnet sets net.ipv4.conf.all.route_localnet=1 so that
+// packets with a loopback source address (127.x.x.x) can be routed out
+// through non-loopback interfaces after OUTPUT-chain DNAT rewrites.
+func enableRouteLocalnet() {
+	const path = "/proc/sys/net/ipv4/conf/all/route_localnet"
+	if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
+		log.Warnf("Could not set route_localnet: %v", err)
+	} else {
+		log.Debug("route_localnet enabled")
+	}
+}
+
+// iptablesAppend adds a rule to a chain only if it does not already exist.
+func iptablesAppend(args ...string) error {
+	// Build -C (check) args: replace the action flag (-A <chain>) with (-C <chain>)
+	checkArgs := make([]string, len(args))
+	copy(checkArgs, args)
+	for i, a := range checkArgs {
+		if a == "-A" {
+			checkArgs[i] = "-C"
+			break
+		}
+	}
+	if exec.Command("iptables", checkArgs...).Run() == nil {
+		return nil // rule already exists
+	}
+	return exec.Command("iptables", args...).Run()
 }
 
 func iptablesRule(proto string, listenPort int, remoteIP string, fwdPort int) error {
@@ -157,18 +196,18 @@ func iptablesRule(proto string, listenPort int, remoteIP string, fwdPort int) er
 	dport := strconv.Itoa(listenPort)
 
 	// PREROUTING: redirect external traffic arriving on this host
-	if err := exec.Command("iptables", "-t", "nat", "-A", "PREROUTING",
+	if err := iptablesAppend("-t", "nat", "-A", "PREROUTING",
 		"-p", proto, "--dport", dport,
 		"-j", "DNAT", "--to-destination", dest,
-	).Run(); err != nil {
+	); err != nil {
 		return err
 	}
 
 	// OUTPUT: redirect locally-originated traffic (e.g. ssh 127.0.0.1 -p <port>)
-	if err := exec.Command("iptables", "-t", "nat", "-A", "OUTPUT",
+	if err := iptablesAppend("-t", "nat", "-A", "OUTPUT",
 		"-p", proto, "--dport", dport,
 		"-j", "DNAT", "--to-destination", dest,
-	).Run(); err != nil {
+	); err != nil {
 		return err
 	}
 
