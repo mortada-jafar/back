@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"unsafe"
 
 	log "github.com/sirupsen/logrus"
@@ -27,12 +28,23 @@ type ifreq struct {
 }
 
 type TunDevice struct {
-	name string
-	file *os.File
-	mtu  int
+	name      string
+	file      *os.File
+	mtu       int
+	closeOnce sync.Once
 }
 
 func NewTunDevice(name, localCIDR, remoteCIDR string, mtu int) (*TunDevice, error) {
+	// Clean up stale device if it exists from a previous crash
+	if deviceExists(name) {
+		log.Warnf("TUN device %q already exists, removing stale device...", name)
+		if err := runCmd("ip", "link", "delete", name); err != nil {
+			log.Warnf("Failed to delete stale device %q: %v", name, err)
+		}
+		// Brief pause for kernel to release
+		unix.Nanosleep(&unix.Timespec{Nsec: 200_000_000}, nil) // 200ms
+	}
+
 	fd, err := unix.Open(tunCloneDevice, unix.O_RDWR|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", tunCloneDevice, err)
@@ -93,9 +105,18 @@ func (d *TunDevice) configure(localCIDR, remoteCIDR string) error {
 
 func (d *TunDevice) Read(buf []byte) (int, error)  { return d.file.Read(buf) }
 func (d *TunDevice) Write(buf []byte) (int, error) { return d.file.Write(buf) }
-func (d *TunDevice) Close() error                   { return d.file.Close() }
-func (d *TunDevice) Name() string                   { return d.name }
-func (d *TunDevice) MTU() int                       { return d.mtu }
+func (d *TunDevice) Close() error {
+	var err error
+	d.closeOnce.Do(func() {
+		log.Infof("Closing TUN device %q", d.name)
+		err = d.file.Close()
+		// Also delete the interface to prevent "device busy" on restart
+		runCmd("ip", "link", "delete", d.name)
+	})
+	return err
+}
+func (d *TunDevice) Name() string { return d.name }
+func (d *TunDevice) MTU() int     { return d.mtu }
 
 func ioctl(fd int, req, arg uintptr) error {
 	_, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), req, arg)
@@ -103,6 +124,11 @@ func ioctl(fd int, req, arg uintptr) error {
 		return errno
 	}
 	return nil
+}
+
+func deviceExists(name string) bool {
+	_, err := net.InterfaceByName(name)
+	return err == nil
 }
 
 func clen(b []byte) int {

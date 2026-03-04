@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"sync/atomic"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -28,14 +29,15 @@ const (
 
 // IPXSocket wraps a raw socket for all IPX profiles.
 type IPXSocket struct {
-	fd        int
-	localIP   net.IP
-	remoteIP  net.IP
-	iface     string
-	profile   string
-	proto     int
-	icmpType  int
-	icmpCode  int
+	fd       int
+	localIP  net.IP
+	remoteIP net.IP
+	iface    string
+	profile  string
+	proto    int
+	icmpType int
+	icmpCode int
+	closed   atomic.Bool
 }
 
 // NewIPXSocket creates the raw socket for the given profile.
@@ -221,7 +223,13 @@ func (s *IPXSocket) SetSendBuffer(size int) error {
 func (s *IPXSocket) SetRecvBuffer(size int) error {
 	return unix.SetsockoptInt(s.fd, unix.SOL_SOCKET, unix.SO_RCVBUF, size)
 }
-func (s *IPXSocket) Close() error { return unix.Close(s.fd) }
+func (s *IPXSocket) Close() error {
+	if s.closed.CompareAndSwap(false, true) {
+		log.Info("Closing IPX raw socket")
+		return unix.Close(s.fd)
+	}
+	return nil
+}
 
 func icmpChecksum(data []byte) uint16 {
 	var sum uint32
