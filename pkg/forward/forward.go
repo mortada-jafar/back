@@ -138,6 +138,10 @@ func IPTablesForwarder(listenPort int, remoteIP string, forwardPort int) error {
 	// to be routed out through real interfaces (e.g. the TUN device).
 	enableRouteLocalnet()
 
+	// Required for PREROUTING-chain DNAT: allows packets arriving on one interface
+	// (e.g. eth0) to be forwarded out another (e.g. the TUN device).
+	enableIPForward()
+
 	// DNAT rule for TCP
 	if err := iptablesRule("tcp", listenPort, remoteIP, forwardPort); err != nil {
 		return err
@@ -171,6 +175,17 @@ func enableRouteLocalnet() {
 		log.Warnf("Could not set route_localnet: %v", err)
 	} else {
 		log.Debug("route_localnet enabled")
+	}
+}
+
+// enableIPForward sets net.ipv4.ip_forward=1 so the kernel forwards packets
+// between interfaces (needed for PREROUTING DNAT: eth0 -> TUN).
+func enableIPForward() {
+	const path = "/proc/sys/net/ipv4/ip_forward"
+	if err := os.WriteFile(path, []byte("1\n"), 0644); err != nil {
+		log.Warnf("Could not enable ip_forward: %v", err)
+	} else {
+		log.Debug("ip_forward enabled")
 	}
 }
 
