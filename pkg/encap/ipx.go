@@ -3,8 +3,11 @@ package encap
 import (
 	"encoding/binary"
 	"fmt"
+	"math/rand"
 	"net"
+	"sync"
 	"sync/atomic"
+	"time"
 
 	log "github.com/sirupsen/logrus"
 	"golang.org/x/sys/unix"
@@ -27,6 +30,23 @@ const (
 	FlagHeartbeat uint16 = 0x0002
 )
 
+// fragKey identifies a reassembly stream: the sender's IP + their random fragment ID.
+type fragKey struct {
+	srcIP  [4]byte
+	fragID uint16
+}
+
+// fragEntry holds the pieces of an in-progress reassembly.
+type fragEntry struct {
+	total    int
+	pieces   map[int][]byte // fragIndex -> data
+	deadline time.Time
+}
+
+// fragHeaderSize is the extra header added to every BIP fragment payload.
+// Layout: fragID(2) | fragTotal(2) | fragIndex(2) | dataLen(2)  = 8 bytes
+const fragHeaderSize = 8
+
 // IPXSocket wraps a raw socket for all IPX profiles.
 type IPXSocket struct {
 	fd       int
@@ -38,6 +58,10 @@ type IPXSocket struct {
 	icmpType int
 	icmpCode int
 	closed   atomic.Bool
+
+	// Reassembly table (only used when fragment_size > 0)
+	reassemblyMu sync.Mutex
+	reassembly   map[fragKey]*fragEntry
 }
 
 // NewIPXSocket creates the raw socket for the given profile.
@@ -77,9 +101,15 @@ func NewIPXSocket(listenIP, dstIP, iface, profile string, icmpType, icmpCode int
 	}
 
 	sock := &IPXSocket{
-		fd: fd, localIP: lip, remoteIP: rip,
-		iface: iface, profile: profile, proto: proto,
-		icmpType: icmpType, icmpCode: icmpCode,
+		fd:         fd,
+		localIP:    lip,
+		remoteIP:   rip,
+		iface:      iface,
+		profile:    profile,
+		proto:      proto,
+		icmpType:   icmpType,
+		icmpCode:   icmpCode,
+		reassembly: make(map[fragKey]*fragEntry),
 	}
 
 	log.WithFields(log.Fields{
@@ -169,6 +199,132 @@ func (s *IPXSocket) SendHeartbeat() error {
 
 // Recv receives a payload. Returns (payload, isHeartbeat, error).
 func (s *IPXSocket) Recv(buf []byte) ([]byte, bool, error) {
+	return s.recvRaw(buf)
+}
+
+// SendFragmented splits payload into chunks of maxFragPayload bytes and sends
+// each as an individual BIP frame with an 8-byte fragment header prepended.
+// Fragment header layout (inside BIP payload):
+//
+//	[fragID: 2B][fragTotal: 2B][fragIndex: 2B][dataLen: 2B]
+//
+// When maxFragPayload <= 0, the packet is sent as-is (same as Send).
+func (s *IPXSocket) SendFragmented(payload []byte, encrypted bool, maxFragPayload int) error {
+	if maxFragPayload <= 0 || len(payload) <= maxFragPayload {
+		return s.Send(payload, encrypted)
+	}
+
+	// Compute fragment count
+	chunkSize := maxFragPayload
+	total := (len(payload) + chunkSize - 1) / chunkSize
+	if total > 0xFFFF {
+		return fmt.Errorf("too many fragments: %d", total)
+	}
+
+	// Random 16-bit ID to group fragments belonging to this original packet
+	fragID := uint16(rand.Uint32())
+
+	for i := 0; i < total; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(payload) {
+			end = len(payload)
+		}
+		chunk := payload[start:end]
+
+		// Build fragmented payload: 8-byte header + chunk data
+		fragPayload := make([]byte, fragHeaderSize+len(chunk))
+		binary.BigEndian.PutUint16(fragPayload[0:2], fragID)
+		binary.BigEndian.PutUint16(fragPayload[2:4], uint16(total))
+		binary.BigEndian.PutUint16(fragPayload[4:6], uint16(i))
+		binary.BigEndian.PutUint16(fragPayload[6:8], uint16(len(chunk)))
+		copy(fragPayload[fragHeaderSize:], chunk)
+
+		if err := s.Send(fragPayload, encrypted); err != nil {
+			return fmt.Errorf("fragment %d/%d send: %w", i+1, total, err)
+		}
+	}
+	return nil
+}
+
+// RecvReassemble reads one raw packet and attempts fragment reassembly.
+// Returns:
+//   - payload: the fully reassembled original payload (nil while pending)
+//   - isHB: true if the packet was a heartbeat
+//   - pending: true if more fragments are still expected (caller should loop)
+//   - err
+func (s *IPXSocket) RecvReassemble(buf []byte) (payload []byte, isHB bool, pending bool, err error) {
+	raw, hb, err := s.recvRaw(buf)
+	if err != nil {
+		return nil, false, false, err
+	}
+	if hb {
+		return nil, true, false, nil
+	}
+
+	// Must have at least a frag header
+	if len(raw) < fragHeaderSize {
+		// Not a fragmented packet — return as-is
+		return raw, false, false, nil
+	}
+
+	fragID := binary.BigEndian.Uint16(raw[0:2])
+	fragTotal := int(binary.BigEndian.Uint16(raw[2:4]))
+	fragIndex := int(binary.BigEndian.Uint16(raw[4:6]))
+	dataLen := int(binary.BigEndian.Uint16(raw[6:8]))
+
+	// Sanity checks — if they fail, treat as an unfragmented legacy packet
+	if fragTotal == 0 || fragIndex >= fragTotal || dataLen > len(raw)-fragHeaderSize {
+		return raw, false, false, nil
+	}
+
+	chunk := raw[fragHeaderSize : fragHeaderSize+dataLen]
+
+	// Derive srcIP from the outer IP header stored in buf (bytes 12–16)
+	var srcIP [4]byte
+	copy(srcIP[:], buf[12:16])
+	key := fragKey{srcIP: srcIP, fragID: fragID}
+
+	s.reassemblyMu.Lock()
+	s.pruneExpired()
+	e2 := s.reassembly[key]
+	if e2 == nil {
+		e2 = &fragEntry{
+			total:    fragTotal,
+			pieces:   make(map[int][]byte),
+			deadline: time.Now().Add(5 * time.Second),
+		}
+		s.reassembly[key] = e2
+	}
+	piece := make([]byte, len(chunk))
+	copy(piece, chunk)
+	e2.pieces[fragIndex] = piece
+	gotAll := len(e2.pieces) == e2.total
+	var assembled []byte
+	if gotAll {
+		// Reassemble in order
+		totalLen := 0
+		for _, p := range e2.pieces {
+			totalLen += len(p)
+		}
+		assembled = make([]byte, 0, totalLen)
+		for i := 0; i < e2.total; i++ {
+			assembled = append(assembled, e2.pieces[i]...)
+		}
+		delete(s.reassembly, key)
+	}
+	s.reassemblyMu.Unlock()
+
+	if gotAll {
+		return assembled, false, false, nil
+	}
+	return nil, false, true, nil
+}
+
+// recvRaw is the shared receive path used by both Recv and RecvReassemble.
+// It reads from the socket, strips the outer IP header and profile-specific
+// header, and returns the raw BIP payload (or signals a heartbeat).
+func (s *IPXSocket) recvRaw(buf []byte) ([]byte, bool, error) {
 	n, _, err := unix.Recvfrom(s.fd, buf, 0)
 	if err != nil {
 		return nil, false, err
@@ -214,6 +370,16 @@ func (s *IPXSocket) Recv(buf []byte) ([]byte, bool, error) {
 
 	default:
 		return raw, false, nil
+	}
+}
+
+// pruneExpired removes timed-out reassembly entries. Must be called with re‌assembleMu held.
+func (s *IPXSocket) pruneExpired() {
+	now := time.Now()
+	for k, e := range s.reassembly {
+		if now.After(e.deadline) {
+			delete(s.reassembly, k)
+		}
 	}
 }
 

@@ -55,7 +55,7 @@ func NewEngine(cfg *config.Config) (*Engine, error) {
 		e.cipher = c
 		log.WithFields(log.Fields{
 			"algorithm": cfg.Security.Algorithm, "kdf_iter": cfg.Security.KDFIterations,
-			"overhead":  c.Overhead(),
+			"overhead": c.Overhead(),
 		}).Info("Encryption enabled")
 	}
 
@@ -460,6 +460,10 @@ func (e *Engine) tunWriteWorker(id int) {
 }
 
 func (e *Engine) ipxSendWorker() {
+	fragSize := 0
+	if e.cfg.IPX != nil {
+		fragSize = e.cfg.IPX.FragmentSize
+	}
 	for {
 		select {
 		case <-e.done:
@@ -473,7 +477,13 @@ func (e *Engine) ipxSendWorker() {
 				}
 				payload, encrypted = enc, true
 			}
-			if err := e.ipx.Send(payload, encrypted); err != nil {
+			var err error
+			if fragSize > 0 {
+				err = e.ipx.SendFragmented(payload, encrypted, fragSize)
+			} else {
+				err = e.ipx.Send(payload, encrypted)
+			}
+			if err != nil {
 				log.Debugf("IPX send: %v", err)
 			}
 		}
@@ -482,20 +492,48 @@ func (e *Engine) ipxSendWorker() {
 
 func (e *Engine) ipxRecvWorker() {
 	buf := make([]byte, e.profile.ReadBufSize)
+	fragSize := 0
+	if e.cfg.IPX != nil {
+		fragSize = e.cfg.IPX.FragmentSize
+	}
 	for {
 		select {
 		case <-e.done:
 			return
 		default:
 		}
-		payload, isHB, err := e.ipx.Recv(buf)
-		if err != nil {
-			continue
+
+		var (
+			payload []byte
+			isHB    bool
+			err     error
+		)
+
+		if fragSize > 0 {
+			var pending bool
+			payload, isHB, pending, err = e.ipx.RecvReassemble(buf)
+			if err != nil {
+				continue
+			}
+			if isHB {
+				e.stats.Heartbeats.Add(1)
+				continue
+			}
+			if pending {
+				// Fragment received but packet not yet complete; read next fragment
+				continue
+			}
+		} else {
+			payload, isHB, err = e.ipx.Recv(buf)
+			if err != nil {
+				continue
+			}
+			if isHB {
+				e.stats.Heartbeats.Add(1)
+				continue
+			}
 		}
-		if isHB {
-			e.stats.Heartbeats.Add(1)
-			continue
-		}
+
 		data := payload
 		if e.cipher != nil {
 			dec, err := e.cipher.Decrypt(payload)

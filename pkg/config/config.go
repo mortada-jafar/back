@@ -68,13 +68,14 @@ type TunConfig struct {
 // ---------- [ipx] ----------
 
 type IPXConfig struct {
-	Mode      string `toml:"mode"`       // "client" or "server"
-	Profile   string `toml:"profile"`    // icmp|ipip|udp|tcp|gre|bip
-	ListenIP  string `toml:"listen_ip"`  // local public IP
-	DstIP     string `toml:"dst_ip"`     // remote endpoint IP
-	Interface string `toml:"interface"`  // physical NIC e.g. "eth0"
-	ICMPType  *int   `toml:"icmp_type"`  // only for icmp profile
-	ICMPCode  *int   `toml:"icmp_code"`  // only for icmp profile
+	Mode         string `toml:"mode"`          // "client" or "server"
+	Profile      string `toml:"profile"`       // icmp|ipip|udp|tcp|gre|bip
+	ListenIP     string `toml:"listen_ip"`     // local public IP
+	DstIP        string `toml:"dst_ip"`        // remote endpoint IP
+	Interface    string `toml:"interface"`     // physical NIC e.g. "eth0"
+	ICMPType     *int   `toml:"icmp_type"`     // only for icmp profile
+	ICMPCode     *int   `toml:"icmp_code"`     // only for icmp profile
+	FragmentSize int    `toml:"fragment_size"` // 0=disabled; 300-1400 bytes recommended for GFW bypass
 }
 
 // ---------- [mux] (only when transport ends with "mux") ----------
@@ -96,8 +97,8 @@ type SecurityConfig struct {
 	// Encryption-based (IPX transports)
 	EnableEncryption *bool  `toml:"enable_encryption"`
 	Algorithm        string `toml:"algorithm"`      // aes-256-gcm|chacha20-poly1305|aes-128-gcm
-	PSK              string `toml:"psk"`             // base64 pre-shared key
-	KDFIterations    int    `toml:"kdf_iterations"`  // PBKDF2 iterations
+	PSK              string `toml:"psk"`            // base64 pre-shared key
+	KDFIterations    int    `toml:"kdf_iterations"` // PBKDF2 iterations
 }
 
 // ---------- [tls] ----------
@@ -113,14 +114,14 @@ type TLSConfig struct {
 type TuningConfig struct {
 	AutoTuning    *bool  `toml:"auto_tuning"`
 	TuningProfile string `toml:"tuning_profile"` // balanced|fast|latency|resource
-	Workers       int    `toml:"workers"`         // 0 = auto (NumCPU)
-	ChannelSize   int    `toml:"channel_size"`    // inter-worker channel buffer
-	TCPMss        int    `toml:"tcp_mss"`         // 0 = auto
-	SoRcvbuf      int    `toml:"so_rcvbuf"`       // 0 = OS default
-	SoSndbuf      int    `toml:"so_sndbuf"`       // 0 = OS default
-	BufferProfile string `toml:"buffer_profile"`  // extreme_low_cpu|ultra_low_cpu|low_cpu|balanced|low_memory
-	BatchSize     int    `toml:"batch_size"`       // IPX batch size
-	ReadTimeout   int    `toml:"read_timeout"`     // seconds
+	Workers       int    `toml:"workers"`        // 0 = auto (NumCPU)
+	ChannelSize   int    `toml:"channel_size"`   // inter-worker channel buffer
+	TCPMss        int    `toml:"tcp_mss"`        // 0 = auto
+	SoRcvbuf      int    `toml:"so_rcvbuf"`      // 0 = OS default
+	SoSndbuf      int    `toml:"so_sndbuf"`      // 0 = OS default
+	BufferProfile string `toml:"buffer_profile"` // extreme_low_cpu|ultra_low_cpu|low_cpu|balanced|low_memory
+	BatchSize     int    `toml:"batch_size"`     // IPX batch size
+	ReadTimeout   int    `toml:"read_timeout"`   // seconds
 }
 
 // ---------- [accept_udp] ----------
