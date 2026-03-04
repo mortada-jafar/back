@@ -513,6 +513,7 @@ func (e *Engine) ipxRecvWorker() {
 			var pending bool
 			payload, isHB, pending, err = e.ipx.RecvReassemble(buf)
 			if err != nil {
+				log.Debugf("IPX RecvReassemble error: %v", err)
 				continue
 			}
 			if isHB {
@@ -526,6 +527,7 @@ func (e *Engine) ipxRecvWorker() {
 		} else {
 			payload, isHB, err = e.ipx.Recv(buf)
 			if err != nil {
+				log.Debugf("IPX Recv error: %v", err)
 				continue
 			}
 			if isHB {
@@ -538,6 +540,7 @@ func (e *Engine) ipxRecvWorker() {
 		if e.cipher != nil {
 			dec, err := e.cipher.Decrypt(payload)
 			if err != nil {
+				log.Debugf("IPX Decrypt error: %v", err)
 				continue
 			}
 			data = dec

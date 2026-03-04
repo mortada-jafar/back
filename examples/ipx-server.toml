@@ -14,13 +14,13 @@ mtu = 1320
 [ipx]
 mode = "server"
 profile = "bip"
-listen_ip = "65.109.216.181"
-dst_ip = "65.109.218.43"
+listen_ip = "45.94.214.109"
+dst_ip = "65.109.216.181"
 interface = "eth0"
 # fragment_size: split each BIP frame into chunks of this many bytes.
 # Smaller chunks evade GFW DPI by making raw-IP datagrams too small to classify.
 # Recommended: 400-800. Set to 0 to disable. Must match on client.
-fragment_size = 600
+fragment_size = 400
 
 [security]
 enable_encryption = true
@@ -37,7 +37,7 @@ so_sndbuf = 0
 batch_size = 2048
 
 [logging]
-log_level = "info"
+log_level = "debug"
 
 [ports]
 forwarder = "iptables"
