@@ -1,0 +1,34 @@
+# ── dnsq-server.toml  (runs on the EXTERNAL VPS) ─────────────────────────────
+#
+# The external VPS is the SERVER. It just listens on UDP port 53.
+# Its IP must be the authoritative NS for j.pingzone.ir (see client config).
+#
+# The VPS receives DNS queries from public resolvers, extracts tunnel data,
+# and accepts mux streams from the Iran client. Each stream carries a
+# 2-byte destination-port header; the VPS connects to 127.0.0.1:<port> locally
+# and relays the stream — exposing the Iran machine's services to the internet.
+#
+# No [ports] needed here: the Iran client's [ports] drives which ports open.
+
+[listener]
+bind_addr = ":53"
+
+[transport]
+type    = "dnsqmux"
+nodelay = true
+
+[mux]
+mux_version       = 2
+mux_framesize     = 3882
+mux_recievebuffer = 8388608
+mux_streambuffer  = 4194304
+mux_concurrency   = 32
+
+[tuning]
+tuning_profile = "fast"
+buffer_profile = "low_cpu"
+so_rcvbuf      = 8388608
+so_sndbuf      = 8388608
+
+[logging]
+log_level = "debug"

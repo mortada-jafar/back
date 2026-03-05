@@ -1,0 +1,37 @@
+# DNS-over-TCP tunnel client
+# Connects to one of the listed DNS resolvers (round-robin with automatic failover).
+# connection_pool = 4 opens 4 parallel TCP connections for maximum throughput.
+#
+# [dns] resolvers: list all your tunnel server IPs on port 53.
+# If the first is unreachable, the next is tried automatically.
+# remote_addr is used as fallback when [dns] section is absent.
+
+[dialer]
+remote_addr    = "SERVER_IP:53"   # fallback if [dns] section is removed
+dial_timeout   = 10
+retry_interval = 3
+
+[transport]
+type            = "dnsmux"
+nodelay         = true
+connection_pool = 4
+
+[dns]
+resolvers = [
+    "SERVER_IP_1:53",
+    "SERVER_IP_2:53",
+    "SERVER_IP_3:53",
+]
+
+[mux]
+mux_version       = 2
+mux_framesize     = 65500
+mux_recievebuffer = 8388608
+mux_streambuffer  = 4194304
+mux_concurrency   = 16
+
+[tuning]
+tuning_profile = "fast"
+buffer_profile = "low_cpu"
+so_rcvbuf      = 8388608
+so_sndbuf      = 8388608

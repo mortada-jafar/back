@@ -1,7 +1,9 @@
 package transport
 
 import (
+	"bufio"
 	"crypto/tls"
+	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
@@ -14,6 +16,86 @@ import (
 
 	"github.com/tunpixbip/backhaul-core/pkg/config"
 )
+
+// dnsMaxMsg is the largest payload per DNS-over-TCP message (just under the 65535 limit).
+const dnsMaxMsg = 65500
+
+// DNSConn wraps a TCP connection with DNS-over-TCP wire framing (RFC 1035 §4.2.2).
+// Each Write is sent as one or more DNS messages prefixed by a 2-byte big-endian length.
+// This makes traffic on port 53 appear as legitimate DNS-over-TCP to packet inspectors,
+// while delivering full TCP throughput (30 MB/s+) when the firewall allows port 53 through.
+type DNSConn struct {
+	net.Conn
+	r       *bufio.Reader
+	readBuf []byte
+	wmu     sync.Mutex
+}
+
+func NewDNSConn(c net.Conn) *DNSConn {
+	return &DNSConn{Conn: c, r: bufio.NewReaderSize(c, 65536)}
+}
+
+func (c *DNSConn) Write(p []byte) (int, error) {
+	c.wmu.Lock()
+	defer c.wmu.Unlock()
+	total := 0
+	for len(p) > 0 {
+		chunk := p
+		if len(chunk) > dnsMaxMsg {
+			chunk = p[:dnsMaxMsg]
+		}
+		hdr := [2]byte{byte(len(chunk) >> 8), byte(len(chunk))}
+		bufs := net.Buffers{hdr[:], chunk}
+		if _, err := bufs.WriteTo(c.Conn); err != nil {
+			return total, err
+		}
+		total += len(chunk)
+		p = p[len(chunk):]
+	}
+	return total, nil
+}
+
+func (c *DNSConn) Read(p []byte) (int, error) {
+	// Drain leftover bytes from a previous oversized message first.
+	if len(c.readBuf) > 0 {
+		n := copy(p, c.readBuf)
+		c.readBuf = c.readBuf[n:]
+		if len(c.readBuf) == 0 {
+			c.readBuf = nil
+		}
+		return n, nil
+	}
+	// Read 2-byte DNS-over-TCP length prefix.
+	var hdr [2]byte
+	if _, err := io.ReadFull(c.r, hdr[:]); err != nil {
+		return 0, err
+	}
+	msgLen := int(binary.BigEndian.Uint16(hdr[:]))
+	if msgLen == 0 {
+		return 0, nil
+	}
+	// Read the full DNS message payload.
+	msg := make([]byte, msgLen)
+	if _, err := io.ReadFull(c.r, msg); err != nil {
+		return 0, err
+	}
+	n := copy(p, msg)
+	if n < msgLen {
+		c.readBuf = msg[n:]
+	}
+	return n, nil
+}
+
+// dnsListener wraps a net.Listener so every Accept returns a *DNSConn.
+type dnsListener struct{ net.Listener }
+
+func (l *dnsListener) Accept() (net.Conn, error) {
+	c, err := l.Listener.Accept()
+	if err != nil {
+		return nil, err
+	}
+	return NewDNSConn(c), nil
+}
 
 // Dial connects to the remote endpoint based on transport type.
 func Dial(cfg *config.Config) (net.Conn, error) {
@@ -61,9 +143,59 @@ func Dial(cfg *config.Config) (net.Conn, error) {
 		}
 		return NewWSConn(conn), nil
 
+	case "dns", "dnsmux":
+		if cfg.DNS != nil && len(cfg.DNS.Resolvers) > 1 {
+			return dialDNSRoundRobin(cfg, timeout)
+		}
+		// Single resolver: use remote_addr or the only entry in resolvers.
+		if cfg.DNS != nil && len(cfg.DNS.Resolvers) == 1 {
+			addr = cfg.DNS.Resolvers[0]
+		}
+		conn, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+		return NewDNSConn(conn), nil
+
+	case "dnsq", "dnsqmux":
+		resolvers := []string{addr}
+		domain := ""
+		if cfg.DNS != nil {
+			if len(cfg.DNS.Resolvers) > 0 {
+				resolvers = cfg.DNS.Resolvers
+			}
+			domain = cfg.DNS.Domain
+		}
+		return DialDNSQuery(resolvers, domain, timeout)
+
 	default:
 		return nil, fmt.Errorf("unsupported dial transport: %s", cfg.Transport.Type)
 	}
+}
+
+// dialDNSRoundRobin tries resolvers in round-robin order, falling back to the
+// next one on connection failure. Returns an error only if all resolvers fail.
+func dialDNSRoundRobin(cfg *config.Config, timeout time.Duration) (net.Conn, error) {
+	resolvers := cfg.DNS.Resolvers
+	n := len(resolvers)
+	// NextAddr atomically advances the counter and returns the chosen address.
+	start := cfg.DNS.NextAddr()
+	for i := 0; i < n; i++ {
+		var addr string
+		if i == 0 {
+			addr = start
+		} else {
+			addr = cfg.DNS.NextAddr()
+		}
+		conn, err := net.DialTimeout("tcp", addr, timeout)
+		if err != nil {
+			log.Debugf("DNS resolver %s unreachable: %v", addr, err)
+			continue
+		}
+		log.Debugf("DNS resolver %s connected", addr)
+		return NewDNSConn(conn), nil
+	}
+	return nil, fmt.Errorf("all DNS resolvers unreachable: %v", resolvers)
 }
 
 // Listen creates a listener based on transport type.
@@ -87,6 +219,16 @@ func Listen(cfg *config.Config) (net.Listener, error) {
 
 	case "ws", "wsmux", "xwsmux":
 		return net.Listen("tcp", addr)
+
+	case "dns", "dnsmux":
+		ln, err := net.Listen("tcp", addr)
+		if err != nil {
+			return nil, err
+		}
+		return &dnsListener{ln}, nil
+
+	case "dnsq", "dnsqmux":
+		return ListenDNSQuery(addr)
 
 	default:
 		return nil, fmt.Errorf("unsupported listen transport: %s", cfg.Transport.Type)

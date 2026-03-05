@@ -1,0 +1,34 @@
+# DNS-over-TCP tunnel server
+# Listens on port 53 TCP. Traffic looks like DNS-over-TCP to packet inspectors,
+# allowing it to pass through firewalls that only permit outbound DNS.
+# Achieves 30 MB/s+ with dnsmux + large frame size.
+
+[listener]
+bind_addr = ":53"
+
+[transport]
+type        = "dnsmux"
+nodelay     = true
+
+[mux]
+mux_version       = 2
+mux_framesize     = 65500   # near DNS-over-TCP max (65535)
+mux_recievebuffer = 8388608
+mux_streambuffer  = 4194304
+mux_concurrency   = 16
+
+[tuning]
+tuning_profile = "fast"
+buffer_profile = "low_cpu"
+so_rcvbuf      = 8388608
+so_sndbuf      = 8388608
+
+# Port forwarding: forward ports on this server to the tunnel client's IP.
+# Use "backhaul" (TCP) or "iptables" (TCP+UDP via DNAT).
+[ports]
+forwarder = "backhaul"
+mapping = [
+    "443",          # forward :443 -> client:443
+    "80",           # forward :80  -> client:80
+    "8080=3000",    # forward :8080 -> client:3000
+]

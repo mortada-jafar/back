@@ -1,0 +1,70 @@
+# ── dnsq-client.toml  (runs on the IRAN machine) ─────────────────────────────
+#
+# The Iran machine is the CLIENT. It dials OUT through public DNS resolvers.
+# The external VPS is the SERVER (dnsq-server.toml).
+#
+# DNS setup on your registrar for pingzone.ir:
+#   Type   Name                    Value
+#   ────   ────                    ─────
+#   A      ns1.j.pingzone.ir       <EXTERNAL_VPS_IP>   ← glue record
+#   NS     j.pingzone.ir           ns1.j.pingzone.ir   ← delegation
+#
+# After DNS propagates, public resolvers (1.1.1.1, 8.8.8.8 …) forward any
+# query for *.j.pingzone.ir to the external VPS on port 53 UDP automatically.
+#
+# Traffic flow:
+#   Iran local port  →  mux stream  →  dnsq tunnel  →  VPS 127.0.0.1:port
+#
+# Port mapping format (same as other transports):
+#   "80"        → Iran:80  tunnelled to VPS:127.0.0.1:80
+#   "443"       → Iran:443 tunnelled to VPS:127.0.0.1:443
+#   "8080=3000" → Iran:8080 tunnelled to VPS:127.0.0.1:3000
+
+[dialer]
+remote_addr    = "EXTERNAL_VPS_IP:53"   # used as fallback if [dns] is absent
+dial_timeout   = 10
+retry_interval = 3
+
+[transport]
+type            = "dnsqmux"
+nodelay         = true
+connection_pool = 1   # dnsq already opens N sockets (one per resolver)
+
+[dns]
+domain = "j.pingzone.ir"   # ← your tunnel subdomain (NS must point to VPS)
+resolvers = [
+    "1.1.1.1:53",
+    "8.8.8.8:53",
+    "9.9.9.9:53",
+    "1.0.0.1:53",
+    "8.8.4.4:53",
+    "149.112.112.112:53",
+    "208.67.222.222:53",
+    "208.67.220.220:53",
+]
+
+# Ports the Iran machine exposes through the tunnel.
+# Each local port is forwarded to 127.0.0.1:<dest> on the external VPS.
+[ports]
+forwarder = "backhaul"
+mapping = [
+    "443",        # Iran:443  → VPS:127.0.0.1:443
+    "80",         # Iran:80   → VPS:127.0.0.1:80
+    "8080=3000",  # Iran:8080 → VPS:127.0.0.1:3000
+]
+
+[mux]
+mux_version       = 2
+mux_framesize     = 3882
+mux_recievebuffer = 8388608
+mux_streambuffer  = 4194304
+mux_concurrency   = 32
+
+[tuning]
+tuning_profile = "fast"
+buffer_profile = "low_cpu"
+so_rcvbuf      = 8388608
+so_sndbuf      = 8388608
+
+[logging]
+log_level = "debug"

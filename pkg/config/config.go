@@ -6,6 +6,7 @@ import (
 	"os"
 	"runtime"
 	"strings"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 )
@@ -24,6 +25,7 @@ type Config struct {
 	AcceptUDP *AcceptUDPConfig `toml:"accept_udp"`
 	Logging   LoggingConfig    `toml:"logging"`
 	Ports     *PortsConfig     `toml:"ports"`
+	DNS       *DNSConfig       `toml:"dns"`
 }
 
 // ---------- [listener] (server mode, non-IPX) ----------
@@ -139,6 +141,35 @@ type LoggingConfig struct {
 	LogLevel string `toml:"log_level"` // panic|fatal|error|warn|info|debug|trace
 }
 
+// ---------- [dns] ----------
+
+// DNSConfig holds DNS-transport-specific settings.
+// Must not be copied after first use (contains atomic state).
+type DNSConfig struct {
+	// Resolvers is the list of DNS resolver addresses to use (round-robin).
+	// For dnsq/dnsqmux direct mode: put your server IPs here (e.g. "1.2.3.4:53").
+	// For dnsq/dnsqmux relay mode (through public resolvers): put "1.1.1.1:53",
+	// "8.8.8.8:53", etc. — requires Domain to be set.
+	Resolvers []string `toml:"resolvers"`
+
+	// Domain is the tunnel domain for dnsq relay mode.
+	// Public resolvers forward queries for *.Domain to your authoritative server.
+	// DNS setup required on your registrar:
+	//   NS  <domain>       ->  ns1.<domain>
+	//   A   ns1.<domain>   ->  <your server IP>
+	// Example: domain = "t.j.pingzone.ir"
+	Domain string `toml:"domain"`
+
+	resolverIdx uint64 // atomic round-robin counter; not in TOML
+}
+
+// NextAddr returns the next resolver address in round-robin order.
+// Safe to call concurrently from multiple goroutines.
+func (d *DNSConfig) NextAddr() string {
+	idx := atomic.AddUint64(&d.resolverIdx, 1) - 1
+	return d.Resolvers[int(idx)%len(d.Resolvers)]
+}
+
 // ---------- [ports] ----------
 
 type PortsConfig struct {
@@ -176,6 +207,15 @@ func (c *Config) IsTun() bool {
 // IsMux returns true if transport type ends with "mux".
 func (c *Config) IsMux() bool {
 	return strings.HasSuffix(c.Transport.Type, "mux")
+}
+
+// IsDNS returns true if the transport uses any DNS-based framing (TCP or UDP query).
+func (c *Config) IsDNS() bool {
+	switch c.Transport.Type {
+	case "dns", "dnsmux", "dnsq", "dnsqmux":
+		return true
+	}
+	return false
 }
 
 // NeedsTLS returns true if the transport requires TLS.
@@ -302,6 +342,8 @@ func validate(cfg *Config) error {
 		"tcp": true, "tcpmux": true, "xtcpmux": true,
 		"ws": true, "wss": true, "wsmux": true, "wssmux": true, "xwsmux": true,
 		"anytls": true, "tun": true,
+		"dns": true, "dnsmux": true,
+		"dnsq": true, "dnsqmux": true,
 	}
 	if !validTransports[cfg.Transport.Type] {
 		return fmt.Errorf("invalid transport type: %q", cfg.Transport.Type)
@@ -366,6 +408,10 @@ func validate(cfg *Config) error {
 
 	if cfg.IsMux() && cfg.Mux == nil {
 		return fmt.Errorf("mux transport requires [mux] section")
+	}
+
+	if cfg.IsDNS() && cfg.DNS != nil && len(cfg.DNS.Resolvers) == 0 {
+		return fmt.Errorf("[dns] resolvers list is empty; provide at least one address or remove the section")
 	}
 
 	if cfg.NeedsTLS() && cfg.Mode() == "server" {

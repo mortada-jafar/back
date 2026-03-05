@@ -31,6 +31,11 @@ type Engine struct {
 	tunCh   chan []byte
 	netCh   chan []byte
 	done    chan struct{}
+
+	// clientSess holds the active mux session when running as a mux client.
+	// clientPortListener goroutines use it to open new streams toward the server.
+	clientSess pmux.Session
+	sessMu     sync.RWMutex
 }
 
 func NewEngine(cfg *config.Config) (*Engine, error) {
@@ -350,6 +355,13 @@ func (e *Engine) proxyClient() error {
 		poolSize = *cfg.Transport.ConnectionPool
 	}
 
+	// Start client-side port listeners once.
+	// Each listener waits for a local TCP connection, then opens a mux stream
+	// to the server which connects to 127.0.0.1:<destPort> on its side.
+	if cfg.IsMux() && cfg.Ports != nil {
+		e.startClientPortListeners()
+	}
+
 	for i := 0; i < poolSize; i++ {
 		go e.proxyClientWorker(i)
 	}
@@ -391,8 +403,36 @@ func (e *Engine) handleMuxServerConn(conn net.Conn) {
 		if err != nil {
 			return
 		}
-		go e.handleProxyConn(stream)
+		go e.handleForwardedStream(stream)
 	}
+}
+
+// handleForwardedStream reads the 2-byte destination-port header written by
+// clientPortForward on the Iran client, then bridges the stream to the local
+// service at 127.0.0.1:<destPort> on this server.
+func (e *Engine) handleForwardedStream(stream net.Conn) {
+	defer stream.Close()
+
+	var hdr [2]byte
+	if _, err := io.ReadFull(stream, hdr[:]); err != nil {
+		log.Debugf("handleForwardedStream: read header: %v", err)
+		return
+	}
+	destPort := int(binary.BigEndian.Uint16(hdr[:]))
+
+	target := fmt.Sprintf("127.0.0.1:%d", destPort)
+	dst, err := net.DialTimeout("tcp", target, 10*time.Second)
+	if err != nil {
+		log.Debugf("handleForwardedStream: dial %s: %v", target, err)
+		return
+	}
+	defer dst.Close()
+
+	log.Debugf("Forwarded mux stream → %s", target)
+	done := make(chan struct{})
+	go func() { io.Copy(dst, stream); close(done) }()
+	io.Copy(stream, dst)
+	<-done
 }
 
 func (e *Engine) handleMuxClientConn(conn net.Conn) {
@@ -402,8 +442,22 @@ func (e *Engine) handleMuxClientConn(conn net.Conn) {
 		log.Errorf("Mux client session: %v", err)
 		return
 	}
-	defer sess.Close()
 
+	// Publish session so clientPortListener goroutines can open streams.
+	e.sessMu.Lock()
+	e.clientSess = sess
+	e.sessMu.Unlock()
+
+	defer func() {
+		sess.Close()
+		e.sessMu.Lock()
+		if e.clientSess == sess {
+			e.clientSess = nil
+		}
+		e.sessMu.Unlock()
+	}()
+
+	// Accept any streams the server may open toward us (future use).
 	for {
 		stream, err := sess.AcceptStream()
 		if err != nil {
@@ -411,6 +465,83 @@ func (e *Engine) handleMuxClientConn(conn net.Conn) {
 		}
 		go e.handleProxyConn(stream)
 	}
+}
+
+// ── Client-side port forwarding ───────────────────────────────────────────────
+// Iran client listens on local ports and tunnels each connection to the server
+// via a new mux stream. Server reads a 2-byte dest-port header and connects to
+// 127.0.0.1:<destPort> on its own host.
+
+func (e *Engine) startClientPortListeners() {
+	mappings, err := forward.ParseMappings(e.cfg.Ports.Mapping)
+	if err != nil {
+		log.Errorf("Parse client port mappings: %v", err)
+		return
+	}
+	for _, m := range mappings {
+		destPort := m.ForwardPort
+		if destPort < 0 {
+			destPort = m.ListenStart // same port on both sides
+		}
+		go e.clientPortListener(m.ListenStart, destPort)
+	}
+}
+
+func (e *Engine) clientPortListener(listenPort, destPort int) {
+	addr := fmt.Sprintf(":%d", listenPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		log.Errorf("Client port listener %s: %v", addr, err)
+		return
+	}
+	defer ln.Close()
+	log.Infof("Client port forward: %s → server:127.0.0.1:%d (via mux stream)", addr, destPort)
+
+	go func() { <-e.done; ln.Close() }()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-e.done:
+				return
+			default:
+				continue
+			}
+		}
+		go e.clientPortForward(conn, destPort)
+	}
+}
+
+func (e *Engine) clientPortForward(local net.Conn, destPort int) {
+	defer local.Close()
+
+	e.sessMu.RLock()
+	sess := e.clientSess
+	e.sessMu.RUnlock()
+
+	if sess == nil {
+		log.Debugf("clientPortForward: no active mux session")
+		return
+	}
+
+	stream, err := sess.OpenStream()
+	if err != nil {
+		log.Debugf("clientPortForward OpenStream: %v", err)
+		return
+	}
+	defer stream.Close()
+
+	// 2-byte big-endian destination port — read by handleForwardedStream on the server.
+	hdr := [2]byte{byte(destPort >> 8), byte(destPort)}
+	if _, err := stream.Write(hdr[:]); err != nil {
+		return
+	}
+
+	done := make(chan struct{})
+	go func() { io.Copy(stream, local); close(done) }()
+	io.Copy(local, stream)
+	<-done
 }
 
 func (e *Engine) handleProxyConn(conn net.Conn) {
