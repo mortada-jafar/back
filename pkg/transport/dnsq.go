@@ -177,6 +177,22 @@ func buildDNSQuery(queryID uint16, domain string, payload []byte) []byte {
 	return msg
 }
 
+// buildNXDomainResponse returns a minimal authoritative NXDOMAIN answer.
+// Sent to non-tunnel DNS queries so public resolvers see this server as a
+// live nameserver and keep forwarding tunnel queries to it.
+func buildNXDomainResponse(queryID uint16, question []byte) []byte {
+	hdr := make([]byte, 12)
+	binary.BigEndian.PutUint16(hdr[0:2], queryID)
+	binary.BigEndian.PutUint16(hdr[2:4], 0x8183) // QR=1 AA=1 RD=1 RA=1 RCODE=3(NXDOMAIN)
+	if len(question) > 0 {
+		binary.BigEndian.PutUint16(hdr[4:6], 1) // QDCOUNT=1
+	}
+	msg := make([]byte, 0, len(hdr)+len(question))
+	msg = append(msg, hdr...)
+	msg = append(msg, question...)
+	return msg
+}
+
 // buildDNSResponse creates a DNS response (QR=1) echoing the incoming query ID
 // and question section so public resolvers can match it to the original query.
 func buildDNSResponse(queryID uint16, question []byte, payload []byte) []byte {
@@ -734,6 +750,11 @@ func (l *DNSQueryListener) recvLoop() {
 		}
 		rdata := parseDNSOptPayload(buf[:n])
 		if rdata == nil {
+			// Not a tunnel query — reply NXDOMAIN so public resolvers
+			// see this as a live authoritative NS and will forward
+			// our actual tunnel queries instead of returning SERVFAIL.
+			qid, qsec := extractDNSQueryInfo(buf[:n])
+			l.sock.WriteToUDP(buildNXDomainResponse(qid, qsec), raddr) //nolint:errcheck
 			continue
 		}
 		sessionID, seq, ack, flags, data, err := decodeFrame(rdata)
