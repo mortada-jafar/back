@@ -749,10 +749,9 @@ func (l *DNSQueryListener) recvLoop() {
 			}
 		}
 		rdata := parseDNSOptPayload(buf[:n])
-		if rdata == nil {
-			// Not a tunnel query — reply NXDOMAIN so public resolvers
-			// see this as a live authoritative NS and will forward
-			// our actual tunnel queries instead of returning SERVFAIL.
+		if len(rdata) < dnsqFrameHdr {
+			// No OPT record, or standard dig OPT with RDLEN=0 — not a tunnel query.
+			// Reply NXDOMAIN so public resolvers see us as a live authoritative NS.
 			qid, qsec := extractDNSQueryInfo(buf[:n])
 			l.sock.WriteToUDP(buildNXDomainResponse(qid, qsec), raddr) //nolint:errcheck
 			continue
