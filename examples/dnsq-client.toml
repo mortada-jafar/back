@@ -31,7 +31,7 @@ nodelay         = true
 connection_pool = 1   # dnsq already opens N sockets (one per resolver)
 
 [dns]
-domain = "j.pingzone.ir"   # ← your tunnel subdomain (NS must point to VPS)
+domain = "tn.pingzone.ir"   # ← your tunnel subdomain (NS must point to VPS)
 resolvers = [
     "1.1.1.1:53",
     "8.8.8.8:53",
@@ -48,9 +48,7 @@ resolvers = [
 [ports]
 forwarder = "backhaul"
 mapping = [
-    "443",        # Iran:443  → VPS:127.0.0.1:443
-    "80",         # Iran:80   → VPS:127.0.0.1:80
-    "8080=3000",  # Iran:8080 → VPS:127.0.0.1:3000
+    "222=22",        # Iran:443  → VPS:127.0.0.1:443
 ]
 
 [mux]

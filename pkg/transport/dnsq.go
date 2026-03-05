@@ -177,6 +177,57 @@ func buildDNSQuery(queryID uint16, domain string, payload []byte) []byte {
 	return msg
 }
 
+// buildDNSResponse creates a DNS response (QR=1) echoing the incoming query ID
+// and question section so public resolvers can match it to the original query.
+func buildDNSResponse(queryID uint16, question []byte, payload []byte) []byte {
+	// DNS Header (12 bytes)
+	hdr := make([]byte, 12)
+	binary.BigEndian.PutUint16(hdr[0:2], queryID) // echo client's query ID
+	binary.BigEndian.PutUint16(hdr[2:4], 0x8180)  // QR=1, AA=1, RD=1, RA=1
+	if len(question) > 0 {
+		binary.BigEndian.PutUint16(hdr[4:6], 1) // QDCOUNT=1
+	}
+	binary.BigEndian.PutUint16(hdr[10:12], 1) // ARCOUNT=1 (OPT record)
+
+	// OPT additional record (EDNS0, RFC 6891)
+	opt := make([]byte, 11+len(payload))
+	opt[0] = 0x00 // root name
+	binary.BigEndian.PutUint16(opt[1:3], 41)   // OPT type
+	binary.BigEndian.PutUint16(opt[3:5], 4096) // UDP payload size
+	// TTL = 0 (bytes 5-8)
+	binary.BigEndian.PutUint16(opt[9:11], uint16(len(payload))) // RDLEN
+	copy(opt[11:], payload)
+
+	msg := make([]byte, 0, len(hdr)+len(question)+len(opt))
+	msg = append(msg, hdr...)
+	msg = append(msg, question...)
+	msg = append(msg, opt...)
+	return msg
+}
+
+// extractDNSQueryInfo extracts the query ID and raw question section bytes
+// from an incoming DNS query message.
+func extractDNSQueryInfo(msg []byte) (queryID uint16, question []byte) {
+	if len(msg) < 12 {
+		return 0, nil
+	}
+	queryID = binary.BigEndian.Uint16(msg[0:2])
+	qdcount := binary.BigEndian.Uint16(msg[4:6])
+	if qdcount == 0 {
+		return queryID, nil
+	}
+	pos := 12
+	for i := uint16(0); i < qdcount && pos < len(msg); i++ {
+		pos = skipDNSName(msg, pos)
+		pos += 4 // type + class
+	}
+	if pos > len(msg) {
+		return queryID, nil
+	}
+	question = msg[12:pos]
+	return queryID, question
+}
+
 // parseDNSOptPayload extracts the EDNS0 OPT RDATA from a raw DNS message.
 // Returns nil if no OPT record is found.
 func parseDNSOptPayload(msg []byte) []byte {
@@ -704,7 +755,8 @@ func (l *DNSQueryListener) recvLoop() {
 			}
 		}
 
-		sess.handleIncoming(seq, ack, flags, data)
+		queryID, question := extractDNSQueryInfo(buf[:n])
+		sess.handleIncoming(raddr, queryID, question, seq, ack, flags, data)
 	}
 }
 
@@ -768,7 +820,9 @@ func newDNSQueryServerConn(sock *net.UDPConn, raddr *net.UDPAddr, sid [8]byte) *
 }
 
 // handleIncoming is called by the listener when a client query arrives for this session.
-func (c *DNSQueryServerConn) handleIncoming(seq, ack uint32, flags uint16, data []byte) {
+// raddr is the source address of THIS specific query (may differ per resolver in relay mode).
+// queryID and question are echoed back in the DNS response so the resolver can match it.
+func (c *DNSQueryServerConn) handleIncoming(raddr *net.UDPAddr, queryID uint16, question []byte, seq, ack uint32, flags uint16, data []byte) {
 	// Update our receive window with the client's data.
 	if len(data) > 0 || flags == dnsqData {
 		c.recvMu.Lock()
@@ -839,9 +893,8 @@ func (c *DNSQueryServerConn) handleIncoming(seq, ack uint32, flags uint16, data 
 		replyFlags = dnsqData
 	}
 	payload := encodeFrame(c.sessionID, seq2, myAck, uint16(replyFlags), chunk)
-	qid := uint16(rand.Uint32())
-	resp := buildDNSQuery(qid, "", payload) // server replies directly; no domain routing needed
-	c.sock.WriteToUDP(resp, c.raddr)    //nolint:errcheck
+	resp := buildDNSResponse(queryID, question, payload)
+	c.sock.WriteToUDP(resp, raddr) //nolint:errcheck
 }
 
 func (c *DNSQueryServerConn) Write(p []byte) (int, error) {

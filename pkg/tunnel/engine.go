@@ -521,8 +521,21 @@ func (e *Engine) clientPortForward(local net.Conn, destPort int) {
 	e.sessMu.RUnlock()
 
 	if sess == nil {
-		log.Debugf("clientPortForward: no active mux session")
-		return
+		// Wait up to 10 s for the mux session to be established.
+		deadline := time.Now().Add(10 * time.Second)
+		for time.Now().Before(deadline) {
+			time.Sleep(100 * time.Millisecond)
+			e.sessMu.RLock()
+			sess = e.clientSess
+			e.sessMu.RUnlock()
+			if sess != nil {
+				break
+			}
+		}
+		if sess == nil {
+			log.Debugf("clientPortForward: timeout waiting for mux session")
+			return
+		}
 	}
 
 	stream, err := sess.OpenStream()
